@@ -3,11 +3,10 @@
     <parent>
         <groupId>org.jenkins-ci.plugins</groupId>
         <artifactId>plugin</artifactId>
-        <version>2.29</version>
+        <version>3.15</version>
     </parent>
 
     <artifactId>vsphere-cloud</artifactId>
-    <version>2.18-SNAPSHOT</version>
     <packaging>hpi</packaging>
     <name>vSphere Plugin</name>
     <description>Integrates Jenkins with a vSphere server</description>
@@ -41,7 +40,16 @@
     </scm>
 
     <properties>
+        <revision>2.20</revision>
+        <changelist>-SNAPSHOT</changelist>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- This is the version we probably want to run. Running this version often fails to compile with
+             hudson.tools.JDKInstaller not found. But if you toggle between 2.107.1 and 2.121.3 it will build
+             and run.
+             <jenkins.version>2.121.3</jenkins.version>
+         -->
+        <jenkins.version>2.107.1</jenkins.version>
+        <java.level>8</java.level>
     </properties>
 
     <repositories>
@@ -61,15 +69,9 @@
 
     <dependencies>
         <dependency>
-            <groupId>org.kohsuke.stapler</groupId>
-            <artifactId>json-lib</artifactId>
-            <version>2.1-rev7</version>
-            <type>jar</type>
-        </dependency>
-        <dependency>
             <groupId>org.jenkins-ci.plugins</groupId>
             <artifactId>credentials</artifactId>
-            <version>1.28</version>
+            <version>2.1.16</version>
             <type>jar</type>
         </dependency>
         <dependency>
@@ -91,7 +93,12 @@
          <dependency>
             <groupId>org.jenkins-ci.plugins</groupId>
             <artifactId>ssh-slaves</artifactId>
-            <version>1.11</version>
+            <version>1.28</version>
+         </dependency>
+         <dependency>
+            <groupId>org.jenkins-ci.plugins</groupId>
+            <artifactId>copyartifact</artifactId>
+            <version>1.39</version>
          </dependency>
         <dependency>
             <groupId>org.jenkins-ci.plugins.workflow</groupId>

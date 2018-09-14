@@ -67,8 +67,7 @@ public class vSphereCloudProvisionedSlave extends vSphereCloudSlave {
             final vSphereCloudLauncher launcher = l instanceof vSphereCloudLauncher ? (vSphereCloudLauncher) l : null;
             if (launcher != null) {
                 final vSphereCloud cloud = launcher.findOurVsInstance();
-                final String cloneName = this.getComputer().getName();
-                cloud.provisionedSlaveHasTerminated(cloneName);
+                cloud.provisionedSlaveHasTerminated(this.getComputer());
             } else {
                 vSphereCloud.Log(listener, "%1s._terminate for vmName %2s failed as getLauncher() returned %3s",
                         getClass().getSimpleName(), getVmName(), l);
@@ -137,7 +136,7 @@ public class vSphereCloudProvisionedSlave extends vSphereCloudSlave {
 
         public List<Descriptor<ComputerLauncher>> getComputerLauncherDescriptors() {
             List<Descriptor<ComputerLauncher>> result = new ArrayList<Descriptor<ComputerLauncher>>();
-            for (Descriptor<ComputerLauncher> launcher : Functions.getComputerLauncherDescriptors()) {
+            for (Descriptor<ComputerLauncher> launcher : this.computerLauncherDescriptors(null)) {
                 if (!vSphereCloudLauncher.class.isAssignableFrom(launcher.clazz)) {
                     result.add(launcher);
                 }

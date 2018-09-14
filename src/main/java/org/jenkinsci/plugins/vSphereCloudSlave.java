@@ -20,6 +20,8 @@ import hudson.util.FormValidation;
 import java.io.IOException;
 
 import org.jenkinsci.plugins.vsphere.VSphereOfflineCause;
+import org.jenkinsci.plugins.vsphere.tools.VSphere;
+import org.jenkinsci.plugins.vsphere.tools.VSphereException;
 import org.kohsuke.stapler.AncestorInPath;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.QueryParameter;
@@ -38,6 +40,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
 
 import jenkins.model.Jenkins;
 
@@ -48,7 +51,7 @@ import jenkins.model.Jenkins;
 public class vSphereCloudSlave extends AbstractCloudSlave {
 
     private final String vsDescription;
-    private final String vmName;
+    private String vmName;
     private final String snapName;
     private final Boolean waitForVMTools;
     private final String launchDelay;
@@ -65,6 +68,8 @@ public class vSphereCloudSlave extends AbstractCloudSlave {
 
     public transient Boolean slaveIsStarting = Boolean.FALSE;
     public transient Boolean slaveIsDisconnecting = Boolean.FALSE;
+
+    private static final java.util.logging.Logger VSLOG = java.util.logging.Logger.getLogger("vsphere-cloud");
 
     @DataBoundConstructor
     public vSphereCloudSlave(String name, String nodeDescription,
@@ -151,6 +156,7 @@ public class vSphereCloudSlave extends AbstractCloudSlave {
         } catch(Exception e) {
             vSphereCloud.Log(this, listener, e, "Can't disconnect %s", vmName);
         }
+        archive();
     }
 
     private static class ProbableLaunchData {
@@ -250,6 +256,90 @@ public class vSphereCloudSlave extends AbstractCloudSlave {
 
     static final private ConcurrentHashMap<Run, Computer> RunToSlaveMapper = new ConcurrentHashMap<Run, Computer>();
 
+    /**
+     * Get the vSphere cloud associated with this slave.
+     *
+     * @return  vSphereCloud instance
+     */
+    public vSphereCloud getvSphereCloud() {
+        for (vSphereCloud vs : getvSphereClouds()) {
+            if (vs.getVsDescription().equals(vsDescription)) {
+                return vs;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Get the vSphere instance associated with this slave.
+     *
+     * @return          VSphere instance
+     */
+    private VSphere getvSphereInstance() {
+        vSphereCloud vsc = getvSphereCloud();
+        if (vsc == null) {
+            VSLOG.log(Level.SEVERE, "Unable to find cloud with description " + vsDescription);
+            return null;
+        }
+        try {
+            return vsc.vSphereInstance();
+        } catch (VSphereException ex) {
+            VSLOG.log(Level.SEVERE, "Exception while trying to get vSphere instance", ex);
+        }
+        return null;
+    }
+
+    /**
+     * Archive the VM associated with this slave.
+     *
+     */
+    private void archive() {
+        VSphere vsp = getvSphereInstance();
+        if (vsp != null) {
+            try {
+                vsp.powerOffVm(vsp.getVmByName(vmName), false, true);
+                vsp.moveVm(vmName, "archived", "archived");
+            } catch (VSphereException ex) {
+                VSLOG.log(Level.SEVERE, "Exception while trying to archive  " + vmName, ex);
+            }
+            vsp.disconnect();
+        }
+    }
+
+    /**
+     * Generates and returns a build tag suitable for naming the slave VM.
+     *
+     * @param run       the Run object that contains the build info
+     * @return          a string with the format jobname_buildnumber
+     */
+    public String getBuildTag(Run run) {
+        return run.getParent().getName() + "_" + run.getNumber();
+    }
+
+    /**
+     * Rename the slave VM to a name corresponding to the build tag
+     *
+     * @param run       the Run object that contains the build info
+     * @param computer  the SlaveComputer associated with the build
+     */
+    public void renameSlaveToBuildTag(Run run, Computer computer) {
+        String cloneName = computer.getName();
+        assert cloneName == vmName;
+        String newName = getBuildTag(run);
+        VSLOG.log(Level.INFO, "renaming " + cloneName + " to " + newName);
+
+        VSphere vsp = getvSphereInstance();
+        if (vsp != null) {
+            try {
+                vsp.renameVm(cloneName, newName);
+                vmName = newName;
+            } catch (VSphereException ex) {
+                VSLOG.log(Level.SEVERE, "Exception while trying to rename " + cloneName, ex);
+            }
+            vsp.disconnect();
+        }
+    }
+
     public boolean StartLimitedTestRun(Run r, TaskListener listener) {
         boolean ret = false;
         boolean DoUpdates = false;
@@ -303,6 +393,7 @@ public class vSphereCloudSlave extends AbstractCloudSlave {
                         slave.disconnect(disconnect);
                         final VSphereOfflineCause tempOnline = new VSphereOfflineCause(Messages._vSphereCloudSlave_LimitedBuild_TemporarilyOnline());
                         slave.setTemporarilyOffline(false, tempOnline);
+                        archive();
                     }
                     else {
                         vSphereCloud.Log(this, "Attempting to shutdown slave due to limited build threshold, but cannot determine slave");
@@ -347,6 +438,16 @@ public class vSphereCloudSlave extends AbstractCloudSlave {
         }
     }
 
+    public static List<vSphereCloud> getvSphereClouds() {
+        List<vSphereCloud> result = new ArrayList<vSphereCloud>();
+        for (Cloud cloud : Jenkins.getInstance().clouds) {
+            if (cloud instanceof vSphereCloud) {
+                result.add((vSphereCloud) cloud);
+            }
+        }
+        return result;
+    }
+
     @Extension
     public static final class DescriptorImpl extends SlaveDescriptor {
 
@@ -364,16 +465,6 @@ public class vSphereCloudSlave extends AbstractCloudSlave {
             return true;
         }
 
-        public List<vSphereCloud> getvSphereClouds() {
-            List<vSphereCloud> result = new ArrayList<vSphereCloud>();
-            for (Cloud cloud : Jenkins.getInstance().clouds) {
-                if (cloud instanceof vSphereCloud) {
-                    result.add((vSphereCloud) cloud);
-                }
-            }
-            return result;
-        }
-
         public vSphereCloud getSpecificvSphereCloud(String vsDescription)
                 throws Exception {
             for (vSphereCloud vs : getvSphereClouds()) {
@@ -386,7 +477,7 @@ public class vSphereCloudSlave extends AbstractCloudSlave {
 
         public List<Descriptor<ComputerLauncher>> getComputerLauncherDescriptors() {
             List<Descriptor<ComputerLauncher>> result = new ArrayList<Descriptor<ComputerLauncher>>();
-            for (Descriptor<ComputerLauncher> launcher : Functions.getComputerLauncherDescriptors()) {
+            for (Descriptor<ComputerLauncher> launcher : this.computerLauncherDescriptors(null)) {
                 if (!vSphereCloudLauncher.class.isAssignableFrom(launcher.clazz)) {
                     result.add(launcher);
                 }

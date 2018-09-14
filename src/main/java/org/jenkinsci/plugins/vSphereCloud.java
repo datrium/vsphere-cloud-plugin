@@ -7,14 +7,19 @@ package org.jenkinsci.plugins;
 import com.cloudbees.hudson.plugins.folder.AbstractFolderProperty;
 import com.cloudbees.hudson.plugins.folder.AbstractFolderPropertyDescriptor;
 import com.cloudbees.hudson.plugins.folder.Folder;
+import com.vmware.vim25.mo.VirtualMachine;
+import hudson.EnvVars;
 import hudson.Extension;
 import hudson.model.*;
 import hudson.model.Descriptor.FormException;
+import hudson.plugins.copyartifact.BuildFilter;
+import hudson.plugins.copyartifact.BuildSelector;
 import hudson.slaves.Cloud;
 import hudson.slaves.NodeProvisioner.PlannedNode;
 import hudson.slaves.SlaveComputer;
 import hudson.util.DescribableList;
 import hudson.util.FormValidation;
+import hudson.util.RunList;
 import hudson.util.StreamTaskListener;
 import jenkins.model.Jenkins;
 import jenkins.slaves.iterators.api.NodeIterator;
@@ -39,6 +44,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 import java.util.logging.Level;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * @author Admin
@@ -302,9 +309,35 @@ public class vSphereCloud extends Cloud {
         return VSphere.connect(connectionConfig);
     }
 
+    public static ConcurrentHashMap<String, String> parseCloneableName(String name) {
+        final ConcurrentHashMap<String, String> cloneableName = new ConcurrentHashMap<String, String>();
+        final Pattern p = Pattern.compile("^(.*?)__PEZ__(.*?)__\\d{15}$");
+        final Matcher m = p.matcher(name);
+        if (m.matches()) {
+            VSLOG.log(Level.FINER, "Cloneable name " + name);
+            cloneableName.put("name", m.group(0));
+            cloneableName.put("labelString", m.group(1));
+            cloneableName.put("jobName", m.group(2));
+        }
+        return cloneableName;
+    }
+
+    public static boolean isCloneableName(String name) {
+        return !parseCloneableName(name).isEmpty();
+    }
+
+    private Label getJobLabel(Label label) {
+        ConcurrentHashMap<String, String> cloneableName = parseCloneableName(label.getName());
+        if (!cloneableName.isEmpty()) {
+            label = Jenkins.getInstance().getLabel(cloneableName.get("labelString"));
+            VSLOG.log(Level.FINER, "Found " + label + " for " + cloneableName.get("jobName"));
+        }
+        return label;
+    }
+
     @Override
     public boolean canProvision(Label label) {
-        return !getTemplates(label).isEmpty();
+        return !getTemplates(getJobLabel(label)).isEmpty();
     }
 
     private Integer calculateMaxAdditionalSlavesPermitted() {
@@ -322,6 +355,7 @@ public class vSphereCloud extends Cloud {
     @Override
     public Collection<PlannedNode> provision(final Label label, int excessWorkload) {
         final String methodCallDescription = "provision(" + label + "," + excessWorkload + ")";
+        final Label jobLabel = getJobLabel(label);
         try {
             int excessWorkloadSoFar = excessWorkload;
             // First we see what our static slaves can do for us.
@@ -331,7 +365,7 @@ public class vSphereCloud extends Cloud {
                 if (n instanceof vSphereCloudProvisionedSlave) {
                     continue; // ignore cloud slaves
                 }
-                if (n.getComputer().isOffline() && label.matches(n.getAssignedLabels())) {
+                if (n.getComputer().isOffline() && jobLabel.matches(n.getAssignedLabels())) {
                     n.getComputer().tryReconnect();
                     numberOfvSphereCloudSlaves++;
                     numberOfvSphereCloudSlaveExecutors += n.getNumExecutors();
@@ -356,7 +390,7 @@ public class vSphereCloud extends Cloud {
                 if (maxSlavesToProvisionBeforeCloudCapHit != null && maxSlavesToProvisionBeforeCloudCapHit <= 0) {
                     return Collections.emptySet(); // no capacity due to cloud instance cap
                 }
-                final List<vSphereCloudSlaveTemplate> templates = getTemplates(label);
+                final List<vSphereCloudSlaveTemplate> templates = getTemplates(jobLabel);
                 final List<CloudProvisioningRecord> whatWeCouldUse = templateState.calculateProvisionableTemplates(templates);
                 VSLOG.log(Level.INFO, methodCallDescription + ": " + numberOfvSphereCloudSlaves + " existing slaves (="
                         + numberOfvSphereCloudSlaveExecutors + " executors), templates available are " + whatWeCouldUse);
@@ -372,7 +406,11 @@ public class vSphereCloud extends Cloud {
                     if (whatWeShouldSpinUp == null) {
                         break; // out of capacity due to template instance cap
                     }
-                    final String nodeName = CloudProvisioningAlgorithm.findUnusedName(whatWeShouldSpinUp);
+                    String nodeName = CloudProvisioningAlgorithm.findUnusedName(whatWeShouldSpinUp);
+                    if (isCloneableName(label.getName())) {
+                        nodeName = label.getName();
+                        VSLOG.log(Level.INFO, methodCallDescription + ": overriding nodeName to " + nodeName);
+                    }
                     final PlannedNode plannedNode = VSpherePlannedNode.createInstance(templateState, nodeName, whatWeShouldSpinUp);
                     plannedNodes.add(plannedNode);
                     excessWorkloadSoFar -= plannedNode.numExecutors;
@@ -434,16 +472,24 @@ public class vSphereCloud extends Cloud {
      * they terminate, so we can take note of their passing and then destroy the
      * VM itself.
      *
-     * @param cloneName The name of the VM that's just terminated.
+     * @param computer  the SlaveComputer object that has been terminated
      */
-    void provisionedSlaveHasTerminated(final String cloneName) {
+    void provisionedSlaveHasTerminated(final SlaveComputer computer) {
+        final String cloneName = computer.getName();
         synchronized (this) {
             ensureLists();
         }
         VSLOG.log(Level.FINER, "provisionedSlaveHasTerminated({0}): recording in our runtime state...", cloneName);
+        boolean cloneable = isCloneableName(cloneName);
         synchronized (templateState) {
-            templateState.provisionedSlaveNowUnwanted(cloneName, true);
+            templateState.provisionedSlaveNowUnwanted(cloneName, !cloneable);
         }
+        if (!cloneable) {
+            deleteClone(cloneName);
+        }
+    }
+
+     private void deleteClone(final String cloneName) {
         // Deletion can take a long time, so we run it asynchronously because,
         // at the point where we're called here, we've locked the remoting queue
         // so Jenkins is largely crippled until we return.
@@ -493,6 +539,108 @@ public class vSphereCloud extends Cloud {
         }
     }
 
+    /**
+     * Checks if a job property is parameterized
+     *
+     * @param jobProp       a job property value
+     * @return              true if parameterized
+     */
+    private static boolean isJobPropertyParameterized(String jobProp) {
+        return (jobProp != null && jobProp.startsWith("$"));
+    }
+
+    /**
+     * Returns the name for an upstream VM slave to clone.
+     * The clone VM is typically derived from the build parameters and/or the job properties.
+     *
+     * @param cloneName     the unique slave name, which is also the unique label name
+     * @return              the name of the VM to clone from
+     */
+    private static String getCloneFromName(String cloneName) {
+        for (Queue.BuildableItem item : Jenkins.getInstance().getQueue().getBuildableItems()) {
+            // The build will be pending in the Q at this point, with a unique label.
+            if (item.task.getAssignedLabel().getName() == cloneName) {
+                VSLOG.log(Level.INFO, "Found in Q: " + cloneName);
+                return getCloneFromName(item);
+            }
+        }
+        return null;
+    }
+
+    private static String getCloneFromName(Queue.BuildableItem item) {
+        vSphereCloudStyleProject job = (vSphereCloudStyleProject) item.task;
+        vSphereCloudJobProperty jobProp = job.getProperty(vSphereCloudJobProperty.class);
+        if (jobProp == null) {
+            // This job is not configured to clone from another build. This will fall back to the
+            // default template, but will still use the cloneable workflow (e.g., VM name is build_tag).
+            return null;
+        }
+        String projectName = jobProp.getProjectName();
+        String params = item.getParams();
+        if (isJobPropertyParameterized(projectName)) {
+            // projectName is parameterized, resolved it from string associated with the Q.item.
+            VSLOG.log(Level.INFO, "parameterized projectName " + projectName);
+            Pattern p = Pattern.compile("\\$\\{?(.*?)\\}?");
+            Matcher m = p.matcher(projectName);
+            String paramProjectName = null;
+            if (m.matches()) {
+                p = Pattern.compile(m.group(1) + "=(.*)");
+                for (String l : params.split("\\r?\\n")) {
+                    m = p.matcher(l);
+                    if (m.matches()) {
+                        paramProjectName = m.group(1);
+                        VSLOG.log(Level.INFO, "resolved projectName " + paramProjectName);
+                        break;
+                    }
+                }
+            }
+            if (paramProjectName == null) {
+                VSLOG.log(Level.SEVERE, "Unable to find parameterized job definition for " + projectName);
+                return null;
+            }
+            projectName = paramProjectName;
+        }
+        final AbstractProject sourceProject = findProjectByName(projectName);
+        if (sourceProject == null) {
+            // Fallback to treating this as a VM name if the project doesn't exist.
+            VSLOG.log(Level.INFO, "Cannot find project " + projectName + ", assuming this is a VM name");
+            return projectName;
+        }
+        // TODO(kyle) Only parameterized builds are currently supported.
+        // TODO(kyle) Need to process item related cause actions to process job property (vs parameterized) buildSelector.
+        BuildSelector buildSelector = jobProp.getBuildSelector();
+        if (buildSelector != null) {
+            // Create a local version of EnvVars containing build info based on item parameters.
+            EnvVars envVars = new EnvVars();
+            Pattern p = Pattern.compile("(.*)=(.*)");
+            for (String l : params.split("\\r?\\n")) {
+                VSLOG.log(Level.INFO, "param " + l);
+                Matcher m = p.matcher(l);
+                if (m.matches()) {
+                    envVars.addLine(l);
+                }
+            }
+            Run r = buildSelector.getBuild(sourceProject, envVars, new BuildFilter(), null);
+            if (r != null) {
+                VSLOG.log(Level.SEVERE, "Unable to find parameterized build for " + projectName + " " + envVars);
+            }
+            projectName += "_" + r.getNumber();
+        }
+        VSLOG.log(Level.INFO, "resolved cloneFromName " + projectName);
+        return projectName;
+    }
+
+    private static AbstractProject<?,?> findProjectByName(String projectName) {
+        // TODO(kyle) Filter on cloneable projects only.
+        for (AbstractProject<?,?> project : Jenkins.getInstance().getAllItems(AbstractProject.class)) {
+            if (projectName.equals(project.getName())) {
+                return project;
+            }
+        }
+        VSLOG.log(Level.INFO, "Unable to find project for  " + projectName);
+        return null;
+    }
+
     static class VSpherePlannedNode extends PlannedNode {
         private VSpherePlannedNode(String displayName, Future<Node> future, int numExecutors) {
             super(displayName, future, numExecutors);
@@ -531,7 +679,7 @@ public class vSphereCloud extends Cloud {
         private static Node provisionNewNode(final CloudProvisioningRecord whatWeShouldSpinUp, final String cloneName)
                 throws VSphereException, FormException, IOException, InterruptedException {
             final vSphereCloudSlaveTemplate template = whatWeShouldSpinUp.getTemplate();
-            final vSphereCloudProvisionedSlave slave = template.provision(cloneName, StreamTaskListener.fromStdout());
+            final vSphereCloudProvisionedSlave slave = template.provision(cloneName, getCloneFromName(cloneName), StreamTaskListener.fromStdout());
             // ensure Jenkins knows about us before we forget what we're doing,
             // otherwise it'll just ask for more.
             Jenkins.getInstance().addNode(slave);

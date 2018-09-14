@@ -30,7 +30,6 @@ import hudson.model.Node.Mode;
 import hudson.model.labels.LabelAtom;
 import hudson.plugins.sshslaves.SSHLauncher;
 import hudson.slaves.NodeProperty;
-import hudson.slaves.CommandLauncher;
 import hudson.slaves.ComputerLauncher;
 import hudson.slaves.JNLPLauncher;
 import hudson.slaves.RetentionStrategy;
@@ -352,23 +351,31 @@ public class vSphereCloudSlaveTemplate implements Describable<vSphereCloudSlaveT
         return this;
     }
 
-    public vSphereCloudProvisionedSlave provision(final String cloneName, final TaskListener listener) throws VSphereException, FormException, IOException, InterruptedException {
+    public vSphereCloudProvisionedSlave provision(final String cloneName, String cloneFromName, final TaskListener listener) throws VSphereException, FormException, IOException, InterruptedException {
         final PrintStream logger = listener.getLogger();
         final Map<String, String> resolvedExtraConfigParameters = calculateExtraConfigParameters(cloneName, listener);
         final VSphere vSphere = getParent().vSphereInstance();
         final vSphereCloudProvisionedSlave slave;
+        if (cloneFromName == null) {
+            cloneFromName = this.masterImageName;
+        }
         try {
-            slave = provision(cloneName, logger, resolvedExtraConfigParameters, vSphere);
+            slave = provision(cloneName, cloneFromName, logger, resolvedExtraConfigParameters, vSphere);
         } finally {
             vSphere.disconnect();
         }
         return slave;
     }
 
-    private vSphereCloudProvisionedSlave provision(final String cloneName, final PrintStream logger, final Map<String, String> resolvedExtraConfigParameters, final VSphere vSphere) throws VSphereException, FormException, IOException {
+    public vSphereCloudProvisionedSlave provision(final String cloneName, final TaskListener listener) throws VSphereException, FormException, IOException, InterruptedException {
+        return this.provision(cloneName, null, listener);
+    }
+
+    private vSphereCloudProvisionedSlave provision(final String cloneName, final String cloneFromName, final PrintStream logger, final Map<String, String> resolvedExtraConfigParameters, final VSphere vSphere) throws VSphereException, FormException, IOException {
         final boolean POWER_ON = true;
         final boolean useCurrentSnapshot;
         final String snapshotToUse;
+        LOGGER.log(Level.INFO, "Using cloneFromName " + cloneFromName);
         if (getUseSnapshot()) {
             final String sn = getSnapshotName();
             if (sn != null && !sn.isEmpty()) {
@@ -383,7 +390,7 @@ public class vSphereCloudSlaveTemplate implements Describable<vSphereCloudSlaveT
             snapshotToUse = null;
         }
         try {
-            vSphere.cloneOrDeployVm(cloneName, this.masterImageName, this.linkedClone, this.resourcePool, this.cluster, this.datastore, this.folder, useCurrentSnapshot, snapshotToUse, POWER_ON, resolvedExtraConfigParameters, this.customizationSpec, logger);
+            vSphere.cloneOrDeployVm(cloneName, cloneFromName, this.linkedClone, this.resourcePool, this.cluster, this.datastore, this.folder, useCurrentSnapshot, snapshotToUse, POWER_ON, resolvedExtraConfigParameters, this.customizationSpec, logger);
             LOGGER.log(Level.FINE, "Created new VM {0} from image {1}", new Object[]{ cloneName, this.masterImageName });
         } catch (VSphereDuplicateException ex) {
             final String vmJenkinsUrl = findWhichJenkinsThisVMBelongsTo(vSphere, cloneName);
@@ -416,7 +423,11 @@ public class vSphereCloudSlaveTemplate implements Describable<vSphereCloudSlaveT
             final ComputerLauncher configuredLauncher = determineLauncher(vSphere, cloneName);
             final RetentionStrategy<?> configuredStrategy = determineRetention();
             final String snapshotNameForLauncher = ""; /* we don't make the launcher do anything with snapshots because our clone won't be created with any */
-            slave = new vSphereCloudProvisionedSlave(cloneName, this.templateDescription, this.remoteFS, String.valueOf(this.numberOfExecutors), this.mode, this.labelString, configuredLauncher, configuredStrategy, this.nodeProperties, this.parent.getVsDescription(), cloneName, this.forceVMLaunch, this.waitForVMTools, snapshotNameForLauncher, String.valueOf(this.launchDelay), null, String.valueOf(this.limitedRunCount));
+            String labelString = this.labelString;
+            if (vSphereCloud.isCloneableName(cloneName)) {
+                labelString = cloneName;
+            }
+            slave = new vSphereCloudProvisionedSlave(cloneName, this.templateDescription, this.remoteFS, String.valueOf(this.numberOfExecutors), this.mode, labelString, configuredLauncher, configuredStrategy, this.nodeProperties, this.parent.getVsDescription(), cloneName, this.forceVMLaunch, this.waitForVMTools, snapshotNameForLauncher, String.valueOf(this.launchDelay), null, String.valueOf(this.limitedRunCount));
         } finally {
             // if anything went wrong, try to tidy up
             if( slave==null ) {
@@ -431,16 +442,13 @@ public class vSphereCloudSlaveTemplate implements Describable<vSphereCloudSlaveT
         if (launcher instanceof JNLPLauncher) {
             return launcher;
         }
-        if (launcher instanceof CommandLauncher) {
-            return launcher;
-        }
         if (launcher instanceof SSHLauncher) {
             final SSHLauncher sshLauncher = (SSHLauncher) launcher;
             LOGGER.log(Level.FINER, "Slave {0} uses SSHLauncher - obtaining IP address...", cloneName);
             final String ip = vSphere.getIp(vSphere.getVmByName(cloneName), 1000);
             LOGGER.log(Level.FINER, "Slave {0} has IP address {1}", new Object[] { cloneName, ip });
             final SSHLauncher launcherWithIPAddress = new SSHLauncher(ip, sshLauncher.getPort(),
-                    sshLauncher.getCredentialsId(), sshLauncher.getJvmOptions(), sshLauncher.getJavaPath(),
+                    sshLauncher.getCredentialsId(), sshLauncher.getJvmOptions(), null,
                     sshLauncher.getPrefixStartSlaveCmd(), sshLauncher.getSuffixStartSlaveCmd(),
                     sshLauncher.getLaunchTimeoutSeconds(), sshLauncher.getMaxNumRetries(),
                     sshLauncher.getRetryWaitTime());
@@ -554,7 +562,6 @@ public class vSphereCloudSlaveTemplate implements Describable<vSphereCloudSlaveT
         public static List<Descriptor<ComputerLauncher>> getLauncherDescriptors() {
             final List<String> supportedLaunchers = Arrays.asList(
                     SSHLauncher.class.getName(),
-                    CommandLauncher.class.getName(),
                     JNLPLauncher.class.getName()
             );
             final List<Descriptor<ComputerLauncher>> knownLaunchers = Jenkins.getInstance().getDescriptorList(ComputerLauncher.class);

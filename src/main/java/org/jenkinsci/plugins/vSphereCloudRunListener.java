@@ -3,7 +3,7 @@
  * and open the template in the editor.
  */
 package org.jenkinsci.plugins;
- 
+
 import hudson.Extension;
 import hudson.model.TaskListener;
 import hudson.model.Computer;
@@ -22,12 +22,28 @@ import java.util.List;
  */
 @Extension
 public final class vSphereCloudRunListener extends RunListener<Run> {
-    
+
     private final List<Run> LimitedRuns = new ArrayList<Run>();
 
     public vSphereCloudRunListener() {
     }
-    
+
+    @Override
+    public void onInitialize(Run r) {
+        super.onInitialize(r);
+        if (r != null) {
+            Executor exec = r.getExecutor();
+            if (exec != null) {
+                Computer owner = exec.getOwner();
+                Node node = owner.getNode();
+                if ((node != null) && (node instanceof vSphereCloudSlave)) {
+                    vSphereCloudSlave s = (vSphereCloudSlave)node;
+                    s.renameSlaveToBuildTag(r, owner);
+                }
+            }
+        }
+    }
+
     @Override
     public void onStarted(Run r, TaskListener listener) {
         super.onStarted(r, listener);

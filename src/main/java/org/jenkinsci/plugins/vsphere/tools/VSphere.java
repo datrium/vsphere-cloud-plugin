@@ -19,6 +19,7 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.rmi.RemoteException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.logging.Logger;
@@ -880,6 +881,52 @@ public class VSphere {
             }
             throw newVSphereException(task.getTaskInfo(), "Could not rename VM \""+ oldName +"\"!");
 
+        } catch(RuntimeException | VSphereException e) {
+            throw e;
+        } catch(Exception e) {
+            throw new VSphereException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Moves the VM
+     * @param name name of the vm
+     * @param dstFolder destination folder
+     * @param dstResourcPool destination resource pool
+     * @throws VSphereException If an error occurred.
+     */
+    public void moveVm(String name, String dstFolder, String dstResourcPool) throws VSphereException {
+        try {
+            VirtualMachine vm = getVmByName(name);
+            if (vm==null) {
+                throw new VSphereNotFoundException("VM", name);
+            }
+            VirtualMachineRelocateSpec rel = new VirtualMachineRelocateSpec();
+            if (dstResourcPool != null && !dstResourcPool.isEmpty()) {
+                ResourcePool resourcePool = getResourcePoolByName(dstResourcPool, null);
+                if (resourcePool == null) {
+                    throw new VSphereNotFoundException("Resource pool", dstResourcPool);
+                }
+                rel.setPool(resourcePool.getMOR());
+                final Task task = vm.relocateVM_Task(rel);
+                final String status = task.waitForTask();
+                if (!status.equals(Task.SUCCESS)) {
+                    throw newVSphereException(task.getTaskInfo(), "Could not move VM into resource pool\""+ name +"\"!");
+                }
+            }
+            if (dstFolder != null && !dstFolder.isEmpty() && folderExists(dstFolder)) {
+                // rel.setFolder above does not move the VM into a folder!
+                final Folder folder = getFolder(dstFolder);
+                if (folder == null) {
+                    throw new VSphereNotFoundException("Folder", dstFolder);
+                }
+                final Task task = folder.moveIntoFolder_Task(Arrays.asList((ManagedEntity) vm).toArray(new ManagedEntity[1]));
+                final String status = task.waitForTask();
+                if (!status.equals(Task.SUCCESS)) {
+                    throw newVSphereException(task.getTaskInfo(), "Could not move VM into folder\""+ name +"\"!");
+                }
+            }
+            LOGGER.log(Level.FINER, "VM was moved successfully.");
         } catch(RuntimeException | VSphereException e) {
             throw e;
         } catch(Exception e) {
