@@ -1,20 +1,23 @@
 # vSphereCloud CloneableProject Jenkins Plugin
 
-At [Datrium](https://www.datrium.com), we use [Jenkins](https://jenkins.io) for generating builds and executing tests.
+When using [Jenkins](https://jenkins.io) as the primary test execution
+engine in a large organization, a number of challenges are present:
 
-## What
+* dealing with large build and test deliverables/artifacts
+* scale and performance of test troughput (tests per build)
 
+* when using Jenkins' archive artifacts, data is frequently copied twice:
+  (1) once to master, and then (2) to some shared storage, like NFS
+* artifact sizes are limited to 2gb
+* when using the CopyArtifacts plugin for downstream tests, data is copied
+  the master to the slave
 
-## Why
-We've been using a clone-based workflow for the last 4 years because it allows
-us to build, test and triage efficiently. Our workflow was previously decoupled
-from Jenkins. We injected a build-step into each job to manage the workflow.
-But, in order to contribute to the Jenkins community, we've converted our
-workflow into a proper Jenkins plugin.
-
-## How
-
+This amount of data movement is often times the primary test performance
+and throughput bottleneck. At Datrium, we've avoided this by using a
+clone-based workflow, which allows artifacts to be saved and consumed
+with zero-copy.
 
 
 # References
-https://www.datrium.com/resources/jenkins-datrium-solution-brief/
+- https://www.datrium.com/resources/jenkins-datrium-solution-brief/
+- https://github.com/datrium/vsphere-cloud-plugin/docs/jenkins-world-2018-final.pdf
